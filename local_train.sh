@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0
 export PYTHONPATH=$PYTHONPATH:./
 
 gpus=(${CUDA_VISIBLE_DEVICES//,/ })
@@ -6,7 +6,6 @@ gpu_num=${#gpus[@]}
 echo "number of gpus: "${gpu_num}
 
 config=projects/configs/$1.py
-checkpoint=$2
 
 if [ ${gpu_num} -gt 1 ]
 then

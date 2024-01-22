@@ -5,3 +5,4 @@ from .detection3d_blocks import (
     SparseBox3DKeyPointsGenerator,
     SparseBox3DEncoder,
 )
+from .losses import SparseBox3DLoss

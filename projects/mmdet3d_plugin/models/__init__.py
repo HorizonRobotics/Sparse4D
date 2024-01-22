@@ -2,8 +2,6 @@ from .sparse4d import Sparse4D
 from .sparse4d_head import Sparse4DHead
 from .blocks import (
     DeformableFeatureAggregation,
-    LinearFusionModule,
-    DepthReweightModule,
     DenseDepthNet,
     AsymmetricFFN,
 )
@@ -21,8 +19,6 @@ __all__ = [
     "Sparse4D",
     "Sparse4DHead",
     "DeformableFeatureAggregation",
-    "LinearFusionModule",
-    "DepthReweightModule",
     "DenseDepthNet",
     "AsymmetricFFN",
     "InstanceBank",

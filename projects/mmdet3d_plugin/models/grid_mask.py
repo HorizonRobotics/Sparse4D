@@ -121,7 +121,7 @@ class GridMask(nn.Module):
             (ww - w) // 2 : (ww - w) // 2 + w,
         ]
 
-        mask = torch.from_numpy(mask).float().cuda()
+        mask = torch.from_numpy(mask.copy()).float().cuda()
         if self.mode == 1:
             mask = 1 - mask
         mask = mask.expand_as(x)

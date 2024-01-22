@@ -14,14 +14,13 @@ from mmcv.runner import (
     wrap_fp16_model,
 )
 
-from mmdet3d.apis import single_gpu_test
-from mmdet3d.datasets import build_dataset
-from mmdet3d.datasets import build_dataloader as build_dataloader_origin
+from mmdet.apis import single_gpu_test, multi_gpu_test, set_random_seed
+from mmdet.datasets import replace_ImageToTensor, build_dataset
+from mmdet.datasets import build_dataloader as build_dataloader_origin
+from mmdet.models import build_detector
+
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from projects.mmdet3d_plugin.apis.test import custom_multi_gpu_test
-from mmdet3d.models import build_model
-from mmdet.apis import multi_gpu_test, set_random_seed
-from mmdet.datasets import replace_ImageToTensor
 
 
 def parse_args():
@@ -231,7 +230,8 @@ def main():
 
     # build the model and load checkpoint
     cfg.model.train_cfg = None
-    model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
+    model = build_detector(cfg.model, test_cfg=cfg.get("test_cfg"))
+    # model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
     fp16_cfg = cfg.get("fp16", None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
@@ -265,8 +265,6 @@ def main():
         outputs = custom_multi_gpu_test(
             model, data_loader, args.tmpdir, args.gpu_collect
         )
-        # outputs = multi_gpu_test(model, data_loader, args.tmpdir,
-        #                          args.gpu_collect)
 
     rank, _ = get_dist_info()
     if rank == 0:

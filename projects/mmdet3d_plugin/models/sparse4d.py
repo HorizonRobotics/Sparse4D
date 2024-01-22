@@ -16,9 +16,10 @@ from mmdet.models import (
 from .grid_mask import GridMask
 
 try:
-    from ..ops import DeformableAggregationFunction as DAF
+    from ..ops import feature_maps_format
+    DAF_VALID = True
 except:
-    DAF = None
+    DAF_VALID = False
 
 __all__ = ["Sparse4D"]
 
@@ -46,7 +47,9 @@ class Sparse4D(BaseDetector):
             self.img_neck = build_neck(img_neck)
         self.head = build_head(head)
         self.use_grid_mask = use_grid_mask
-        self.use_deformable_func = use_deformable_func and DAF is not None
+        if use_deformable_func:
+            assert DAF_VALID, "deformable_aggregation needs to be set up."
+        self.use_deformable_func = use_deformable_func
         if depth_branch is not None:
             self.depth_branch = build_from_cfg(depth_branch, PLUGIN_LAYERS)
         else:
@@ -81,80 +84,45 @@ class Sparse4D(BaseDetector):
         else:
             depths = None
         if self.use_deformable_func:
-            feature_maps = DAF.feature_maps_format(feature_maps)
+            feature_maps = feature_maps_format(feature_maps)
         if return_depth:
             return feature_maps, depths
         return feature_maps
 
     @force_fp32(apply_to=("img",))
-    def forward(self, **data):
+    def forward(self, img, **data):
         if self.training:
-            return self.forward_train(**data)
+            return self.forward_train(img, **data)
         else:
-            return self.forward_test(**data)
+            return self.forward_test(img, **data)
 
-    def forward_train(self, **data):
-        img = data.pop("img")
+    def forward_train(self, img, **data):
         feature_maps, depths = self.extract_feat(img, True, data)
-
-        if "data_queue" in data or "future_data_queue" in data:
-            feature_queue = []
-            meta_queue = []
-            with torch.no_grad():
-                for d in data.get("data_queue", []) + data.get(
-                    "future_data_queue", []
-                ):
-                    img = d.pop("img")
-                    feature_queue.append(self.extract_feat(img))
-                    meta_queue.append(d)
-        else:
-            feature_queue = None
-            meta_queue = None
-
-        cls_scores, reg_preds = self.head(
-            feature_maps, data, feature_queue, meta_queue
-        )
-        if self.use_deformable_func:
-            feature_maps = DAF.feature_maps_format(feature_maps, inverse=True)
-        output = self.head.loss(cls_scores, reg_preds, data, feature_maps)
+        model_outs = self.head(feature_maps, data)
+        output = self.head.loss(model_outs, data)
         if depths is not None and "gt_depth" in data:
             output["loss_dense_depth"] = self.depth_branch.loss(
                 depths, data["gt_depth"]
             )
         return output
 
-    def forward_test(self, **data):
-        if isinstance(data["img"], list):
-            return self.aug_test(**data)
+    def forward_test(self, img, **data):
+        if isinstance(img, list):
+            return self.aug_test(img, **data)
         else:
-            return self.simple_test(**data)
+            return self.simple_test(img, **data)
 
-    def simple_test(self, **data):
-        img = data.pop("img")
+    def simple_test(self, img, **data):
         feature_maps = self.extract_feat(img)
 
-        if "future_data_queue" in data:
-            feature_queue = []
-            meta_queue = []
-            with torch.no_grad():
-                for d in data["future_data_queue"]:
-                    img = d.pop("img")
-                    feature_queue.append(self.extract_feat(img))
-                    meta_queue.append(d)
-        else:
-            feature_queue = None
-            meta_queue = None
-
-        cls_scores, reg_preds = self.head(
-            feature_maps, data, feature_queue, meta_queue
-        )
-        results = self.head.post_process(cls_scores, reg_preds)
+        model_outs = self.head(feature_maps, data)
+        results = self.head.post_process(model_outs)
         output = [{"img_bbox": result} for result in results]
         return output
 
-    def aug_test(self, **data):
+    def aug_test(self, img, **data):
         # fake test time augmentation
         for key in data.keys():
             if isinstance(data[key], list):
                 data[key] = data[key][0]
-        return self.simple_test(**data)
+        return self.simple_test(img[0], **data)

@@ -5,7 +5,7 @@
 # ---------------------------------------------
 
 from .mmdet_train import custom_train_detector
-from mmseg.apis import train_segmentor
+# from mmseg.apis import train_segmentor
 from mmdet.apis import train_detector
 
 
@@ -51,23 +51,12 @@ def train_model(
     Because we need different eval_hook in runner. Should be deprecated in the
     future.
     """
-    if cfg.model.type in ["EncoderDecoder3D"]:
-        train_segmentor(
-            model,
-            dataset,
-            cfg,
-            distributed=distributed,
-            validate=validate,
-            timestamp=timestamp,
-            meta=meta,
-        )
-    else:
-        train_detector(
-            model,
-            dataset,
-            cfg,
-            distributed=distributed,
-            validate=validate,
-            timestamp=timestamp,
-            meta=meta,
-        )
+    train_detector(
+        model,
+        dataset,
+        cfg,
+        distributed=distributed,
+        validate=validate,
+        timestamp=timestamp,
+        meta=meta,
+    )

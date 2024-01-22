@@ -1,4 +1,3 @@
-import torch
 import random
 import math
 import os
@@ -8,6 +7,8 @@ import tempfile
 import copy
 
 import numpy as np
+import torch
+from torch.utils.data import Dataset
 import pyquaternion
 from nuscenes.utils.data_classes import Box as NuScenesBox
 from nuscenes.eval.detection.config import config_factory as det_configs
@@ -16,29 +17,15 @@ from nuscenes.eval.common.config import config_factory as track_configs
 import mmcv
 from mmcv.utils import print_log
 from mmdet.datasets import DATASETS
-from mmdet3d.core.bbox import LiDARInstance3DBoxes
-from mmdet3d.datasets.custom_3d import Custom3DDataset
-from mmdet3d.datasets.pipelines import Compose
+from mmdet.datasets.pipelines import Compose
+from .utils import (
+    draw_lidar_bbox3d_on_img,
+    draw_lidar_bbox3d_on_bev,
+)
 
 
 @DATASETS.register_module()
-class NuScenes3DDetTrackDataset(Custom3DDataset):
-    NameMapping = {
-        "movable_object.barrier": "barrier",
-        "vehicle.bicycle": "bicycle",
-        "vehicle.bus.bendy": "bus",
-        "vehicle.bus.rigid": "bus",
-        "vehicle.car": "car",
-        "vehicle.construction": "construction_vehicle",
-        "vehicle.motorcycle": "motorcycle",
-        "human.pedestrian.adult": "pedestrian",
-        "human.pedestrian.child": "pedestrian",
-        "human.pedestrian.construction_worker": "pedestrian",
-        "human.pedestrian.police_officer": "pedestrian",
-        "movable_object.trafficcone": "traffic_cone",
-        "vehicle.trailer": "trailer",
-        "vehicle.truck": "truck",
-    }
+class NuScenes3DDetTrackDataset(Dataset):
     DefaultAttribute = {
         "car": "vehicle.parked",
         "pedestrian": "pedestrian.moving",
@@ -51,26 +38,6 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         "barrier": "",
         "traffic_cone": "",
     }
-    AttrMapping = {
-        "cycle.with_rider": 0,
-        "cycle.without_rider": 1,
-        "pedestrian.moving": 2,
-        "pedestrian.standing": 3,
-        "pedestrian.sitting_lying_down": 4,
-        "vehicle.moving": 5,
-        "vehicle.parked": 6,
-        "vehicle.stopped": 7,
-    }
-    AttrMapping_rev = [
-        "cycle.with_rider",
-        "cycle.without_rider",
-        "pedestrian.moving",
-        "pedestrian.standing",
-        "pedestrian.sitting_lying_down",
-        "vehicle.moving",
-        "vehicle.parked",
-        "vehicle.stopped",
-    ]
     ErrNameMapping = {
         "trans_err": "mATE",
         "scale_err": "mASE",
@@ -112,43 +79,36 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         load_interval=1,
         with_velocity=True,
         modality=None,
-        box_type_3d="LiDAR",
-        filter_empty_gt=True,
         test_mode=False,
         det3d_eval_version="detection_cvpr_2019",
         track3d_eval_version="tracking_nips_2019",
         version="v1.0-trainval",
         use_valid_flag=False,
-        vis_score_threshold=0.35,
-        seq_frame=0,
-        max_tracking_frame_interval=1,
-        max_interval=1,
-        min_interval=1,
-        max_time_interval=5,
-        fix_interval=True,
-        future_frame=0,
-        rot_range=[-0.3925, 0.3925],
-        scale_ratio_range=[1.0, 1.0],
-        translation_std=[0, 0, 0],
+        vis_score_threshold=0.25,
         data_aug_conf=None,
-        tracking=False,
         sequences_split_num=1,
         with_seq_flag=False,
         keep_consistent_seq_aug=True,
+        tracking=False,
+        tracking_threshold=0.2,
     ):
         self.version = version
         self.load_interval = load_interval
         self.use_valid_flag = use_valid_flag
-        super().__init__(
-            data_root=data_root,
-            ann_file=ann_file,
-            pipeline=pipeline,
-            classes=classes,
-            modality=modality,
-            box_type_3d=box_type_3d,
-            filter_empty_gt=filter_empty_gt,
-            test_mode=test_mode,
-        )
+        super().__init__()
+        self.data_root = data_root
+        self.ann_file = ann_file
+        self.test_mode = test_mode
+        self.modality = modality
+        self.box_mode_3d = 0
+
+        if classes is not None:
+            self.CLASSES = classes
+        self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
+        self.data_infos = self.load_annotations(self.ann_file)
+
+        if pipeline is not None:
+            self.pipeline = Compose(pipeline)
 
         self.with_velocity = with_velocity
         self.det3d_eval_version = det3d_eval_version
@@ -165,25 +125,18 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             )
         self.vis_score_threshold = vis_score_threshold
 
-        self.seq_frame = seq_frame
-        self.max_tracking_frame_interval = max_tracking_frame_interval
-        self.min_interval = min_interval
-        self.max_interval = max_interval
-        self.max_time_interval = max_time_interval
-        self.fix_interval = fix_interval
-        self.future_frame = future_frame
-
-        self.rot_range = rot_range
-        self.scale_ratio_range = scale_ratio_range
-        self.translation_std = translation_std
         self.data_aug_conf = data_aug_conf
         self.tracking = tracking
+        self.tracking_threshold = tracking_threshold
         self.sequences_split_num = sequences_split_num
         self.keep_consistent_seq_aug = keep_consistent_seq_aug
         self.current_aug = None
         self.last_id = None
         if with_seq_flag:
             self._set_sequence_group_flag()
+
+    def __len__(self):
+        return len(self.data_infos)
 
     def _set_sequence_group_flag(self):
         """
@@ -238,7 +191,9 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
                 )
                 self.flag = np.array(new_flags, dtype=np.int64)
 
-    def _sample_augmentation(self):
+    def get_augmentation(self):
+        if self.data_aug_conf is None:
+            return None
         H, W = self.data_aug_conf["H"], self.data_aug_conf["W"]
         fH, fW = self.data_aug_conf["final_dim"]
         if not self.test_mode:
@@ -258,6 +213,7 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             if self.data_aug_conf["rand_flip"] and np.random.choice([0, 1]):
                 flip = True
             rotate = np.random.uniform(*self.data_aug_conf["rot_lim"])
+            rotate_3d = np.random.uniform(*self.data_aug_conf["rot3d_range"])
         else:
             resize = max(fH / H, fW / W)
             resize_dims = (int(W * resize), int(H * resize))
@@ -270,199 +226,26 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
             flip = False
             rotate = 0
-        return resize, resize_dims, crop, flip, rotate
-
-    def pre_pipeline(
-        self, results, rot_angle=None, scale_ratio=None, aug_configs=None
-    ):
-        super().pre_pipeline(results)
-        if rot_angle is None:
-            results["rot_angle"] = np.random.uniform(*self.rot_range)
-        else:
-            results["rot_angle"] = rot_angle
-        if scale_ratio is None:
-            results["scale_ratio"] = np.random.uniform(*self.scale_ratio_range)
-        else:
-            results["scale_ratio"] = scale_ratio
-        if self.data_aug_conf is not None and aug_configs is None:
-            results["aug_configs"] = self._sample_augmentation()
-        else:
-            results["aug_configs"] = aug_configs
-        if not self.test_mode and "instance_inds" in results["ann_info"]:
-            results["instance_inds"] = results["ann_info"]["instance_inds"]
-        results["seq_frame"] = self.seq_frame
-        results["tracking"] = self.tracking
-        results["test_mode"] = self.test_mode
-        return (
-            results["rot_angle"],
-            results["scale_ratio"],
-            results["aug_configs"],
-        )
-
-    def _getitem(
-        self, idx, rot_angle=None, scale_ratio=None, aug_configs=None
-    ):
-        if self.test_mode:
-            data, aug_configs = self.prepare_test_data(idx, aug_configs)
-            return data, None, None, aug_configs
-        while True:
-            (
-                data,
-                rot_angle,
-                scale_ratio,
-                aug_configs,
-            ) = self.prepare_train_data(
-                idx,
-                rot_angle=rot_angle,
-                scale_ratio=scale_ratio,
-                aug_configs=aug_configs,
-            )
-            if data is None:
-                idx = self._rand_another(idx)
-                continue
-            return data, rot_angle, scale_ratio, aug_configs
-
-    def prepare_test_data(self, index, aug_configs=None):
-        input_dict = self.get_data_info(index)
-        aug_configs = self.pre_pipeline(input_dict, aug_configs=aug_configs)[
-            -1
-        ]
-        example = self.pipeline(input_dict)
-        return example, aug_configs
-
-    def prepare_train_data(
-        self, index, rot_angle=None, scale_ratio=None, aug_configs=None
-    ):
-        input_dict = self.get_data_info(index)
-        if input_dict is None:
-            return None, rot_angle, scale_ratio, aug_configs
-        rot_angle, scale_ratio, aug_configs = self.pre_pipeline(
-            input_dict,
-            rot_angle=rot_angle,
-            scale_ratio=scale_ratio,
-            aug_configs=aug_configs,
-        )
-        example = self.pipeline(input_dict)
-        if self.filter_empty_gt and (
-            example is None or ~(example["gt_labels_3d"]._data != -1).any()
-        ):
-            return None, rot_angle, scale_ratio, aug_configs
-        return example, rot_angle, scale_ratio, aug_configs
+            rotate_3d = 0
+        aug_config = {
+            "resize": resize,
+            "resize_dims": resize_dims,
+            "crop": crop,
+            "flip": flip,
+            "rotate": rotate,
+            "rotate_3d": rotate_3d,
+        }
+        return aug_config
 
     def __getitem__(self, idx):
         if isinstance(idx, dict):
-            rot_angle, scale_ratio, aug_configs = idx["aug"]
+            aug_config = idx["aug_config"]
             idx = idx["idx"]
-            data = self._getitem(idx, rot_angle, scale_ratio, aug_configs)[0]
         else:
-            data, rot_angle, scale_ratio, aug_configs = self._getitem(idx)
-        # if (
-        #     not self.keep_consistent_seq_aug
-        #     or idx == 0
-        #     or self.flag[idx] != self.flag[idx - 1]
-        #     or self.current_aug is None
-        # ):
-        #     data, rot_angle, scale_ratio, aug_configs = self._getitem(idx)
-        #     self.current_aug = rot_angle, scale_ratio, aug_configs
-        # else:
-        #     data = self._getitem(idx, *self.current_aug)[0]
-        #     rot_angle, scale_ratio, aug_configs = self.current_aug
-
-        if isinstance(data["img_metas"], list):
-            cur_timestamp = data["img_metas"][0].data["timestamp"]
-        else:
-            cur_timestamp = data["img_metas"].data["timestamp"]
-
-        interval = (
-            int(random.random() * self.max_interval) + self.min_interval
-        )
-        if self.seq_frame > 0 and not self.test_mode:
-            seq_frame_indice = []
-            seq_frame_num = self.seq_frame
-            if self.tracking:
-                seq_frame_num += (
-                    int(
-                        random.random()
-                        * (self.max_tracking_frame_interval + 1)
-                    )
-                    + 1
-                )
-
-            idx_next = idx
-            for i in range(seq_frame_num):
-                if idx_next == 0:
-                    break
-                idx_next -= interval
-                if not self.fix_interval:
-                    interval = (
-                        int(random.random() * self.max_interval)
-                        + self.min_interval
-                    )
-                if (
-                    i >= self.seq_frame
-                    and seq_frame_num - i > self.seq_frame + 1
-                ):
-                    continue
-                idx_next = max(idx_next, 0)
-                seq_frame_indice.append(idx_next)
-
-            data_queue = []
-            for seq_idx in seq_frame_indice:
-                seq_data = self._getitem(
-                    seq_idx, rot_angle, scale_ratio, aug_configs
-                )[0]
-                if isinstance(seq_data["img_metas"], list):
-                    seq_timestamp = seq_data["img_metas"][0].data["timestamp"]
-                else:
-                    seq_timestamp = seq_data["img_metas"].data["timestamp"]
-                if abs(seq_timestamp - cur_timestamp) > self.max_time_interval:
-                    break
-                data_queue.append(seq_data)
-            data["data_queue"] = data_queue
-
-            if len(data_queue) > 0 and "instance_inds" in data:
-                last_frame_id = max(len(data_queue) - self.seq_frame - 1, 0)
-                last_instance_inds = data["data_queue"][last_frame_id][
-                    "instance_inds"
-                ]
-                match_flag = (
-                    last_instance_inds[None] == data["instance_inds"][:, None]
-                )
-                dummy_flag = np.logical_not(
-                    match_flag.any(axis=-1, keepdims=True)
-                )
-                match_flag = np.concatenate([dummy_flag, match_flag], axis=-1)
-                match_inds = np.where(match_flag)[1] - 1
-                data["match_inds"] = match_inds
-
-        if self.future_frame > 0:
-            idx_next = idx
-            future_data_queue = []
-            if self.test_mode:
-                interval = 1
-            for i in range(self.future_frame):
-                if idx_next == self.__len__() - 1:
-                    break
-                idx_next += interval
-                if not self.fix_interval:
-                    interval = (
-                        int(random.random() * self.max_interval)
-                        + self.min_interval
-                    )
-                idx_next = min(idx_next, self.__len__() - 1)
-                future_data = self._getitem(
-                    idx_next, rot_angle, scale_ratio, aug_configs
-                )[0]
-                if isinstance(future_data["img_metas"], list):
-                    seq_timestamp = future_data["img_metas"][0].data[
-                        "timestamp"
-                    ]
-                else:
-                    seq_timestamp = future_data["img_metas"].data["timestamp"]
-                if abs(seq_timestamp - cur_timestamp) > self.max_time_interval:
-                    break
-                future_data_queue.append(future_data)
-            data["future_data_queue"] = future_data_queue
+            aug_config = self.get_augmentation()
+        data = self.get_data_info(idx)
+        data["aug_config"] = aug_config
+        data = self.pipeline(data)
         return data
 
     def get_cat_ids(self, idx):
@@ -480,7 +263,7 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         return cat_ids
 
     def load_annotations(self, ann_file):
-        data = mmcv.load(ann_file)
+        data = mmcv.load(ann_file, file_format="pkl")
         data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
         data_infos = data_infos[:: self.load_interval]
         self.metadata = data["metadata"]
@@ -544,13 +327,11 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
 
         if not self.test_mode:
             annos = self.get_ann_info(index)
-            input_dict["ann_info"] = annos
-
+            input_dict.update(annos)
         return input_dict
 
     def get_ann_info(self, index):
         info = self.data_infos[index]
-        # filter out bbox containing no points
         if self.use_valid_flag:
             mask = info["valid_flag"]
         else:
@@ -571,14 +352,6 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             gt_velocity[nan_mask] = [0.0, 0.0]
             gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
 
-        # the nuscenes box center is [0.5, 0.5, 0.5], we change it to be
-        # the same as KITTI (0.5, 0.5, 0)
-        gt_bboxes_3d = LiDARInstance3DBoxes(
-            gt_bboxes_3d,
-            box_dim=gt_bboxes_3d.shape[-1],
-            origin=(0.5, 0.5, 0.5),
-        ).convert_to(self.box_mode_3d)
-
         anns_results = dict(
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
@@ -589,26 +362,27 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             anns_results["instance_inds"] = instance_inds
         return anns_results
 
-    def _format_bbox(self, results, jsonfile_prefix=None):
+    def _format_bbox(self, results, jsonfile_prefix=None, tracking=False):
         nusc_annos = {}
         mapped_class_names = self.CLASSES
 
         print("Start to convert detection format...")
         for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
             annos = []
-            boxes = output_to_nusc_box(det)
+            boxes = output_to_nusc_box(
+                det, threshold=self.tracking_threshold if tracking else None
+            )
             sample_token = self.data_infos[sample_id]["token"]
-            boxes, sampled_points = lidar_nusc_box_to_global(
+            boxes = lidar_nusc_box_to_global(
                 self.data_infos[sample_id],
                 boxes,
                 mapped_class_names,
                 self.det3d_eval_configs,
                 self.det3d_eval_version,
-                det.get("sampled_points", None),
             )
             for i, box in enumerate(boxes):
                 name = mapped_class_names[box.label]
-                if self.tracking and name in [
+                if tracking and name in [
                     "barrier",
                     "traffic_cone",
                     "construction_vehicle",
@@ -642,9 +416,7 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
                     rotation=box.orientation.elements.tolist(),
                     velocity=box.velocity[:2].tolist(),
                 )
-                if sampled_points[i] is not None:
-                    nusc_anno.update(sampled_points=sampled_points[i].tolist())
-                if not self.tracking:
+                if not tracking:
                     nusc_anno.update(
                         dict(
                             detection_name=name,
@@ -675,9 +447,8 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         return res_path
 
     def _evaluate_single(
-        self, result_path, logger=None, result_name="img_bbox"
+        self, result_path, logger=None, result_name="img_bbox", tracking=False
     ):
-
         from nuscenes import NuScenes
 
         output_dir = osp.join(*osp.split(result_path)[:-1])
@@ -688,7 +459,7 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             "v1.0-mini": "mini_val",
             "v1.0-trainval": "val",
         }
-        if not self.tracking:
+        if not tracking:
             from nuscenes.eval.detection.evaluate import NuScenesEval
 
             nusc_eval = NuScenesEval(
@@ -765,7 +536,7 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
 
         return detail
 
-    def format_results(self, results, jsonfile_prefix=None, metric="bbox"):
+    def format_results(self, results, jsonfile_prefix=None, tracking=False):
         assert isinstance(results, list), "results must be a list"
 
         if jsonfile_prefix is None:
@@ -775,7 +546,9 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             tmp_dir = None
 
         if not ("pts_bbox" in results[0] or "img_bbox" in results[0]):
-            result_files = self._format_bbox(results, jsonfile_prefix)
+            result_files = self._format_bbox(
+                results, jsonfile_prefix, tracking=tracking
+            )
         else:
             result_files = dict()
             for name in results[0]:
@@ -783,7 +556,11 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
                 results_ = [out[name] for out in results]
                 tmp_file_ = osp.join(jsonfile_prefix, name)
                 result_files.update(
-                    {name: self._format_bbox(results_, tmp_file_)}
+                    {
+                        name: self._format_bbox(
+                            results_, tmp_file_, tracking=tracking
+                        )
+                    }
                 )
         return result_files, tmp_dir
 
@@ -798,50 +575,37 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         out_dir=None,
         pipeline=None,
     ):
-        result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
+        for metric in ["detection", "tracking"]:
+            tracking = metric == "tracking"
+            if tracking and not self.tracking:
+                continue
+            result_files, tmp_dir = self.format_results(
+                results, jsonfile_prefix, tracking=tracking
+            )
 
-        if isinstance(result_files, dict):
-            results_dict = dict()
-            for name in result_names:
-                ret_dict = self._evaluate_single(result_files[name])
-            results_dict.update(ret_dict)
-        elif isinstance(result_files, str):
-            results_dict = self._evaluate_single(result_files)
-        if tmp_dir is not None:
-            tmp_dir.cleanup()
+            if isinstance(result_files, dict):
+                results_dict = dict()
+                for name in result_names:
+                    ret_dict = self._evaluate_single(
+                        result_files[name], tracking=tracking
+                    )
+                results_dict.update(ret_dict)
+            elif isinstance(result_files, str):
+                results_dict = self._evaluate_single(
+                    result_files, tracking=tracking
+                )
+            if tmp_dir is not None:
+                tmp_dir.cleanup()
 
         if show or out_dir:
             self.show(results, save_dir=out_dir, show=show, pipeline=pipeline)
         return results_dict
 
-    def _build_default_pipeline(self):
-        pipeline = [
-            dict(
-                type="LoadPointsFromFile",
-                coord_type="LIDAR",
-                load_dim=5,
-                use_dim=5,
-                file_client_args=dict(backend="disk"),
-            ),
-            dict(
-                type="LoadPointsFromMultiSweeps",
-                sweeps_num=10,
-                file_client_args=dict(backend="disk"),
-            ),
-            dict(
-                type="DefaultFormatBundle3D",
-                class_names=self.CLASSES,
-                with_label=False,
-            ),
-            dict(type="Collect3D", keys=["points"]),
-        ]
-        return Compose(pipeline)
-
     def show(self, results, save_dir=None, show=False, pipeline=None):
         save_dir = "./" if save_dir is None else save_dir
         save_dir = os.path.join(save_dir, "visual")
         print_log(os.path.abspath(save_dir))
-        pipeline = self._get_pipeline(pipeline)
+        pipeline = Compose(pipeline)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
 
@@ -851,34 +615,17 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         for i, result in enumerate(results):
             if "img_bbox" in result.keys():
                 result = result["img_bbox"]
-            # data_info = self.data_infos.__getitem__(i)
             data_info = pipeline(self.get_data_info(i))
             imgs = []
-            raw_imgs = [
-                x.permute(1, 2, 0).cpu().numpy() for x in data_info["img"].data
-            ]
+
+            raw_imgs = data_info["img"]
             lidar2img = data_info["img_metas"].data["lidar2img"]
-            # gt_bboxes_3d = self.get_ann_info(i)['gt_bboxes_3d']
             pred_bboxes_3d = result["boxes_3d"][
                 result["scores_3d"] > self.vis_score_threshold
             ]
-            if not isinstance(pred_bboxes_3d, LiDARInstance3DBoxes):
-                pred_bboxes_3d = LiDARInstance3DBoxes(
-                    pred_bboxes_3d,
-                    box_dim=pred_bboxes_3d.shape[-1],
-                    origin=(0.5, 0.5, 0.5),
-                ).convert_to(self.box_mode_3d)
-
-            if "sampled_points" in result and "track_ids" not in result:
-                sampled_points = result["sampled_points"][
-                    result["scores_3d"] > self.vis_score_threshold
-                ]
-            else:
-                sampled_points = None
-
-            if "track_ids" in result:
+            if "instance_ids" in result and self.tracking:
                 color = []
-                for id in result["track_ids"].cpu().numpy().tolist():
+                for id in result["instance_ids"].cpu().numpy().tolist():
                     color.append(
                         self.ID_COLOR_MAP[int(id % len(self.ID_COLOR_MAP))]
                     )
@@ -889,6 +636,7 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
             else:
                 color = (255, 0, 0)
 
+            # ===== draw boxes_3d to images =====
             for j, img_origin in enumerate(raw_imgs):
                 img = img_origin.copy()
                 if len(pred_bboxes_3d) != 0:
@@ -900,65 +648,16 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
                         color=color,
                         thickness=3,
                     )
-                    if sampled_points is not None:
-                        img = draw_points_on_img(
-                            sampled_points,
-                            img,
-                            lidar2img[j],
-                            color=color,
-                            circle=4,
-                        )
-
                 imgs.append(img)
 
-            bev_range = 124  # meters
-            marking_color = (127, 127, 127)
-            bev_h, bev_w = img.shape[0] * 2, img.shape[0] * 2
-            # bev_h, bev_w = img.shape[1], img.shape[1]
-            bev = np.zeros([bev_h, bev_w, 3])
-            bev_resolution = 124 / bev_h
-            for cir in range(int(bev_range / 2 / 10)):
-                cv2.circle(
-                    bev,
-                    (int(bev_h / 2), int(bev_w / 2)),
-                    int((cir + 1) * 10 / bev_resolution),
-                    marking_color,
-                    thickness=3,
-                )
-            cv2.line(
-                bev,
-                (0, int(bev_h / 2)),
-                (bev_w, int(bev_h / 2)),
-                marking_color,
+            # ===== draw boxes_3d to BEV =====
+            bev = draw_lidar_bbox3d_on_bev(
+                pred_bboxes_3d,
+                bev_size=img.shape[0] * 2,
+                color=color,
             )
-            cv2.line(
-                bev,
-                (int(bev_w / 2), 0),
-                (int(bev_w / 2), bev_h),
-                marking_color,
-            )
-            if len(pred_bboxes_3d) != 0:
-                bev_corners = pred_bboxes_3d.corners[:, [0, 3, 4, 7]][
-                    ..., [0, 1]
-                ]
-                xs = bev_corners[..., 0] / bev_resolution + bev_w / 2
-                ys = -bev_corners[..., 1] / bev_resolution + bev_h / 2
-                for obj_idx, (x, y) in enumerate(zip(xs, ys)):
-                    for p1, p2 in ((0, 1), (0, 2), (1, 3), (2, 3)):
-                        if "track_ids" in result or "labels_3d" in result:
-                            tmp = color[obj_idx]
-                        else:
-                            tmp = color
-                        cv2.line(
-                            bev,
-                            (int(x[p1]), int(y[p1])),
-                            (int(x[p2]), int(y[p2])),
-                            tmp,
-                            thickness=3,
-                        )
-            bev = np.uint8(bev)
-            padding = np.zeros_like(bev)
 
+            # ===== put text and concat =====
             for j, name in enumerate(
                 [
                     "front",
@@ -998,6 +697,8 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
                 axis=0,
             )
             image = np.concatenate([image, bev], axis=1)
+
+            # ===== save video =====
             if videoWriter is None:
                 videoWriter = cv2.VideoWriter(
                     os.path.join(save_dir, "video.avi"),
@@ -1010,12 +711,21 @@ class NuScenes3DDetTrackDataset(Custom3DDataset):
         videoWriter.release()
 
 
-def output_to_nusc_box(detection):
+def output_to_nusc_box(detection, threshold=None):
     box3d = detection["boxes_3d"]
     scores = detection["scores_3d"].numpy()
     labels = detection["labels_3d"].numpy()
-    if "track_ids" in detection:
-        ids = detection["track_ids"]  # .numpy()
+    if "instance_ids" in detection:
+        ids = detection["instance_ids"]  # .numpy()
+    if threshold is not None:
+        if "cls_scores" in detection:
+            mask = detection["cls_scores"].numpy() >= threshold
+        else:
+            mask = scores >= threshold
+        box3d = box3d[mask]
+        scores = scores[mask]
+        labels = labels[mask]
+        ids = ids[mask]
 
     if hasattr(box3d, "gravity_center"):
         box_gravity_center = box3d.gravity_center.numpy()
@@ -1048,7 +758,7 @@ def output_to_nusc_box(detection):
             score=scores[i],
             velocity=velocity,
         )
-        if "track_ids" in detection:
+        if "instance_ids" in detection:
             box.token = ids[i]
         box_list.append(box)
     return box_list
@@ -1060,10 +770,8 @@ def lidar_nusc_box_to_global(
     classes,
     eval_configs,
     eval_version="detection_cvpr_2019",
-    sampled_points=None,
 ):
     box_list = []
-    sampled_points_filtered = []
     for i, box in enumerate(boxes):
         # Move box to ego vehicle coord system
         box.rotate(pyquaternion.Quaternion(info["lidar2ego_rotation"]))
@@ -1078,130 +786,4 @@ def lidar_nusc_box_to_global(
         box.rotate(pyquaternion.Quaternion(info["ego2global_rotation"]))
         box.translate(np.array(info["ego2global_translation"]))
         box_list.append(box)
-        if sampled_points is not None:
-            sampled_points_filtered.append(sampled_points[i])
-        else:
-            sampled_points_filtered.append(None)
-    return box_list, sampled_points_filtered
-
-
-def plot_rect3d_on_img(
-    img, num_rects, rect_corners, color=(0, 255, 0), thickness=1
-):
-    """Plot the boundary lines of 3D rectangular on 2D images.
-
-    Args:
-        img (numpy.array): The numpy array of image.
-        num_rects (int): Number of 3D rectangulars.
-        rect_corners (numpy.array): Coordinates of the corners of 3D
-            rectangulars. Should be in the shape of [num_rect, 8, 2].
-        color (tuple[int], optional): The color to draw bboxes.
-            Default: (0, 255, 0).
-        thickness (int, optional): The thickness of bboxes. Default: 1.
-    """
-    line_indices = (
-        (0, 1),
-        (0, 3),
-        (0, 4),
-        (1, 2),
-        (1, 5),
-        (3, 2),
-        (3, 7),
-        (4, 5),
-        (4, 7),
-        (2, 6),
-        (5, 6),
-        (6, 7),
-    )
-    h, w = img.shape[:2]
-    for i in range(num_rects):
-        corners = np.clip(rect_corners[i], -1e4, 1e5).astype(np.int32)
-        for start, end in line_indices:
-            if (
-                (corners[start, 1] >= h or corners[start, 1] < 0)
-                or (corners[start, 0] >= w or corners[start, 0] < 0)
-            ) and (
-                (corners[end, 1] >= h or corners[end, 1] < 0)
-                or (corners[end, 0] >= w or corners[end, 0] < 0)
-            ):
-                continue
-            if isinstance(color[0], int):
-                cv2.line(
-                    img,
-                    (corners[start, 0], corners[start, 1]),
-                    (corners[end, 0], corners[end, 1]),
-                    color,
-                    thickness,
-                    cv2.LINE_AA,
-                )
-            else:
-                cv2.line(
-                    img,
-                    (corners[start, 0], corners[start, 1]),
-                    (corners[end, 0], corners[end, 1]),
-                    color[i],
-                    thickness,
-                    cv2.LINE_AA,
-                )
-
-    return img.astype(np.uint8)
-
-
-def draw_lidar_bbox3d_on_img(
-    bboxes3d, raw_img, lidar2img_rt, img_metas, color=(0, 255, 0), thickness=1
-):
-    """Project the 3D bbox on 2D plane and draw on input image.
-
-    Args:
-        bboxes3d (:obj:`LiDARInstance3DBoxes`):
-            3d bbox in lidar coordinate system to visualize.
-        raw_img (numpy.array): The numpy array of image.
-        lidar2img_rt (numpy.array, shape=[4, 4]): The projection matrix
-            according to the camera intrinsic parameters.
-        img_metas (dict): Useless here.
-        color (tuple[int], optional): The color to draw bboxes.
-            Default: (0, 255, 0).
-        thickness (int, optional): The thickness of bboxes. Default: 1.
-    """
-    img = raw_img.copy()
-    corners_3d = bboxes3d.corners
-    num_bbox = corners_3d.shape[0]
-    pts_4d = np.concatenate(
-        [corners_3d.reshape(-1, 3), np.ones((num_bbox * 8, 1))], axis=-1
-    )
-    lidar2img_rt = copy.deepcopy(lidar2img_rt).reshape(4, 4)
-    if isinstance(lidar2img_rt, torch.Tensor):
-        lidar2img_rt = lidar2img_rt.cpu().numpy()
-    pts_2d = pts_4d @ lidar2img_rt.T
-
-    pts_2d[:, 2] = np.clip(pts_2d[:, 2], a_min=1e-5, a_max=1e5)
-    pts_2d[:, 0] /= pts_2d[:, 2]
-    pts_2d[:, 1] /= pts_2d[:, 2]
-    imgfov_pts_2d = pts_2d[..., :2].reshape(num_bbox, 8, 2)
-
-    return plot_rect3d_on_img(img, num_bbox, imgfov_pts_2d, color, thickness)
-
-
-def draw_points_on_img(points, img, lidar2img_rt, color=(0, 255, 0), circle=4):
-    img = img.copy()
-    N = points.shape[0]
-    points = points.cpu().numpy()
-    lidar2img_rt = copy.deepcopy(lidar2img_rt).reshape(4, 4)
-    if isinstance(lidar2img_rt, torch.Tensor):
-        lidar2img_rt = lidar2img_rt.cpu().numpy()
-    pts_2d = (
-        np.sum(points[:, :, None] * lidar2img_rt[:3, :3], axis=-1)
-        + lidar2img_rt[:3, 3]
-    )
-    pts_2d[..., 2] = np.clip(pts_2d[..., 2], a_min=1e-5, a_max=1e5)
-    pts_2d = pts_2d[..., :2] / pts_2d[..., 2:3]
-    pts_2d = np.clip(pts_2d, -1e4, 1e4).astype(np.int32)
-
-    for i in range(N):
-        for point in pts_2d[i]:
-            if isinstance(color[0], int):
-                color_tmp = color
-            else:
-                color_tmp = color[i]
-            cv2.circle(img, point.tolist(), circle, color_tmp, thickness=-1)
-    return img.astype(np.uint8)
+    return box_list

@@ -16,14 +16,13 @@ from mmcv.runner import get_dist_info, init_dist
 from os import path as osp
 
 from mmdet import __version__ as mmdet_version
-from mmdet3d import __version__ as mmdet3d_version
-from mmdet3d.apis import train_model
-from mmdet3d.datasets import build_dataset
-from mmdet3d.models import build_model
-from mmdet3d.utils import collect_env, get_root_logger
+from mmdet.apis import train_detector
+from mmdet.datasets import build_dataset
+from mmdet.models import build_detector
+from mmdet.utils import collect_env, get_root_logger
 from mmdet.apis import set_random_seed
-from mmseg import __version__ as mmseg_version
 from torch import distributed as dist
+from datetime import timedelta
 
 import cv2
 
@@ -205,13 +204,16 @@ def main():
             init_method=args.dist_url,
             world_size=mpi_world_size,
             rank=mpi_local_rank,
+            timeout=timedelta(seconds=3600),
         )
 
         cfg.gpu_ids = range(mpi_world_size)
         print("cfg.gpu_ids:", cfg.gpu_ids)
     else:
         distributed = True
-        init_dist(args.launcher, **cfg.dist_params)
+        init_dist(
+            args.launcher, timeout=timedelta(seconds=3600), **cfg.dist_params
+        )
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
@@ -226,12 +228,8 @@ def main():
     # specify logger name, if we still use 'mmdet', the output info will be
     # filtered and won't be saved in the log_file
     # TODO: ugly workaround to judge whether we are training det or seg model
-    if cfg.model.type in ["EncoderDecoder3D"]:
-        logger_name = "mmseg"
-    else:
-        logger_name = "mmdet"
     logger = get_root_logger(
-        log_file=log_file, log_level=cfg.log_level, name=logger_name
+        log_file=log_file, log_level=cfg.log_level
     )
 
     # init the meta dict to record some important information such as
@@ -262,7 +260,7 @@ def main():
     meta["seed"] = args.seed
     meta["exp_name"] = osp.basename(args.config)
 
-    model = build_model(
+    model = build_detector(
         cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg")
     )
     model.init_weights()
@@ -286,13 +284,8 @@ def main():
         # checkpoints as meta data
         cfg.checkpoint_config.meta = dict(
             mmdet_version=mmdet_version,
-            mmseg_version=mmseg_version,
-            mmdet3d_version=mmdet3d_version,
             config=cfg.pretty_text,
             CLASSES=datasets[0].CLASSES,
-            PALETTE=datasets[0].PALETTE  # for segmentors
-            if hasattr(datasets[0], "PALETTE")
-            else None,
         )
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
@@ -307,7 +300,7 @@ def main():
             meta=meta,
         )
     else:
-        train_model(
+        train_detector(
             model,
             datasets,
             cfg,

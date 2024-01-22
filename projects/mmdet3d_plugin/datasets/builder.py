@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from mmdet.datasets.samplers import GroupSampler
 from projects.mmdet3d_plugin.datasets.samplers import (
-    InfiniteGroupEachSampleInBatchSampler,
+    GroupInBatchSampler,
     DistributedGroupSampler,
     DistributedSampler,
     build_sampler
@@ -51,8 +51,8 @@ def build_dataloader(
     rank, world_size = get_dist_info()
     batch_sampler = None
     if runner_type == 'IterBasedRunner':
-        print("Use InfiniteGroupEachSampleInBatchSampler !!!")
-        batch_sampler = InfiniteGroupEachSampleInBatchSampler(
+        print("Use GroupInBatchSampler !!!")
+        batch_sampler = GroupInBatchSampler(
             dataset,
             samples_per_gpu,
             world_size,
@@ -152,7 +152,10 @@ OBJECTSAMPLERS = Registry("Object sampler")
 
 
 def custom_build_dataset(cfg, default_args=None):
-    from mmdet3d.datasets.dataset_wrappers import CBGSDataset
+    try:
+        from mmdet3d.datasets.dataset_wrappers import CBGSDataset
+    except:
+        CBGSDataset = None
     from mmdet.datasets.dataset_wrappers import (
         ClassBalancedDataset,
         ConcatDataset,

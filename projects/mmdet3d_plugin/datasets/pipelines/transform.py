@@ -73,9 +73,10 @@ class NuScenesSparse4DAdaptor(object):
             input_dict["cam_intrinsic"] = np.float32(
                 np.stack(input_dict["cam_intrinsic"])
             )
-            input_dict["focal"] = np.sqrt(
-                np.abs(np.linalg.det(input_dict["cam_intrinsic"][:, :2, :2]))
-            )
+            input_dict["focal"] = input_dict["cam_intrinsic"][..., 0, 0]
+            # input_dict["focal"] = np.sqrt(
+            #     np.abs(np.linalg.det(input_dict["cam_intrinsic"][:, :2, :2]))
+            # )
         if "instance_inds" in input_dict:
             input_dict["instance_id"] = input_dict["instance_inds"]
 

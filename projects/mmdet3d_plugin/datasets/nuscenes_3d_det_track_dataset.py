@@ -310,7 +310,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 lidar2cam_rt = np.eye(4)
                 lidar2cam_rt[:3, :3] = lidar2cam_r.T
                 lidar2cam_rt[3, :3] = -lidar2cam_t
-                intrinsic = cam_info["cam_intrinsic"]
+                intrinsic = copy.deepcopy(cam_info["cam_intrinsic"])
                 cam_intrinsic.append(intrinsic)
                 viewpad = np.eye(4)
                 viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic

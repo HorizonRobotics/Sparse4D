@@ -58,4 +58,4 @@ bash local_train.sh sparse4dv3_temporal_r50_1x8_bs6_256x704
 bash local_test.sh sparse4dv3_temporal_r50_1x8_bs6_256x704  path/to/checkpoint
 ```
 
-For inference-related guidelines, please refer to the [tutorial/tutorial.ipynb](tutorial/tutorial.ipynb).
+For inference-related guidelines, please refer to the [tutorial/tutorial.ipynb](../tutorial/tutorial.ipynb).

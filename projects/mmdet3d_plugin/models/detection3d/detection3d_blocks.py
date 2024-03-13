@@ -291,6 +291,10 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 T_src2dst[..., :vel_dim, :vel_dim], vel[..., None]
             ).squeeze(-1)
             dst_anchor = torch.cat([center, size, yaw, vel], dim=-1)
+            index = [X, Y, Z, W, L, H, COS_YAW, SIN_YAW] + [VX, VY, VZ][:vel_dim]
+            index = torch.tensor(index, device=dst_anchor.device)
+            index = torch.argsort(index)
+            dst_anchor = dst_anchor.index_select(dim=-1, index=index)
             dst_anchors.append(dst_anchor)
         return dst_anchors
 

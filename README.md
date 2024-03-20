@@ -52,6 +52,7 @@ These experiments were conducted using 8 RTX 3090 GPUs with 24 GB memory.
 |Sparse4Dv2|[VoV-99](https://huggingface.co/Yuxin-CV/EVA-02/blob/main/eva02/det/eva02_L_coco_det_sys_o365.pth)|640x1600|0.638|0.556|0.462|0.238|0.328|0.264|0.115|-|-|-|
 |Sparse4Dv3|[VoV-99](https://huggingface.co/Yuxin-CV/EVA-02/blob/main/eva02/det/eva02_L_coco_det_sys_o365.pth)|640x1600|0.656|0.570|0.412|0.236|0.312|0.210|0.117|0.574|0.970|669|
 |Sparse4Dv3-offline|[EVA02-large](https://huggingface.co/Yuxin-CV/EVA-02/blob/main/eva02/det/eva02_L_coco_det_sys_o365.pth)|640x1600|0.719|0.668|0.346|0.234|0.279|0.142|0.145|0.677|0.761|514|
+
 PS: In the nuscenes leaderboard, Sparse4Dv3 selected external data=True because the eva02-large pretraining utilized imagenet, object365, and coco, as well as supervised by CLIP. Therefore, we consider using the model pre-trained with eva02 as incorporating external data. **However, we did not use external 3D detection data for training.** This clarification is provided to facilitate fair comparisons.
 
 

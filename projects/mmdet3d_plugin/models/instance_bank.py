@@ -231,7 +231,8 @@ class InstanceBank(nn.Module):
         new_ids = torch.arange(num_new_instance).to(instance_id) + self.prev_id
         instance_id[torch.where(mask)] = new_ids
         self.prev_id += num_new_instance
-        self.update_instance_id(instance_id, confidence)
+        if self.num_temp_instances > 0:
+            self.update_instance_id(instance_id, confidence)
         return instance_id
 
     def update_instance_id(self, instance_id=None, confidence=None):

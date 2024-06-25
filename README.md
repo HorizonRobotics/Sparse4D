@@ -7,7 +7,10 @@
 > [Sparse4D v1: Multi-view 3D Object Detection with Sparse Spatial-Temporal Fusion](https://arxiv.org/abs/2211.10581) \
 > [Sparse4D v2: Recurrent Temporal Fusion with Sparse Model](https://arxiv.org/abs/2305.14018) \
 > [Sparse4D v3: Advancing End-to-End 3D Detection and Tracking](https://arxiv.org/abs/2311.11722) \
+> [SparseDrive: End-to-End Autonomous Driving via Sparse Scene Representation](https://arxiv.org/abs/2405.19620) \
 > [Chinese Interpretation of the Papers](https://zhuanlan.zhihu.com/p/637096473)
+
+**【2024/06】Our follow-up project, SparseDrive (an end-to-end planning model based on the sparse framework), has been released!!! [arxiv](https://arxiv.org/abs/2405.19620) & [github](https://github.com/swc-17/SparseDrive).**
 
 ## Overall Architecture
 <center>
